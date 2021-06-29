@@ -7,7 +7,6 @@ use std::fmt;
 
 use crate::simples3::credential::*;
 use futures::{Future, Stream};
-use hmac::{Hmac, Mac, NewMac};
 use http::header::HeaderName;
 use hyper::header::HeaderValue;
 use hyper::Method;
@@ -15,7 +14,6 @@ use hyperx::header;
 use reqwest::r#async::{Client, Request};
 use rusoto_signature::Region;
 use rusoto_signature::SignedRequest;
-use sha1::Sha1;
 
 use crate::errors::*;
 use crate::util::HeadersExt;
@@ -30,61 +28,56 @@ pub enum Ssl {
     No,
 }
 
-fn base_url(endpoint: &str, ssl: Ssl) -> String {
-    format!(
-        "{}://{}/",
-        match ssl {
-            Ssl::Yes => "https",
-            Ssl::No => "http",
-        },
-        endpoint
-    )
-}
-
-fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut hmac = Hmac::<Sha1>::new_varkey(key).expect("HMAC can take key of any size");
-    hmac.update(data);
-    hmac.finalize().into_bytes().as_slice().to_vec()
-}
-
-fn signature(string_to_sign: &str, signing_key: &str) -> String {
-    let s = hmac(signing_key.as_bytes(), string_to_sign.as_bytes());
-    base64::encode_config(&s, base64::STANDARD)
-}
-
 /// An S3 bucket.
 pub struct Bucket {
     name: String,
-    base_url: String,
+    region: Region,
     client: Client,
+    server_side_encryption: Option<String>,
 }
 
 impl fmt::Display for Bucket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Bucket(name={}, base_url={})", self.name, self.base_url)
+        write!(f, "Bucket(name={}, region={:?})", self.name, self.region)
     }
 }
 
 impl Bucket {
-    pub fn new(name: &str, endpoint: &str, ssl: Ssl) -> Result<Bucket> {
-        let base_url = base_url(&endpoint, ssl);
+    pub fn new(
+        name: &str,
+        region: Option<&str>,
+        endpoint: Option<&str>,
+        server_side_encryption: Option<&str>,
+    ) -> Result<Bucket> {
+        let region = if let Some(endpoint) = endpoint {
+            Region::Custom {
+                name: "custom".into(),
+                endpoint: endpoint.into(),
+            }
+        } else if let Some(region) = region {
+            region.parse().map_err(|err| {
+                HttpClientError(format!("Invalid AWS region: {}: {}", region, err))
+            })?
+        } else {
+            Region::UsEast1
+        };
+
         Ok(Bucket {
             name: name.to_owned(),
-            base_url,
+            region,
             client: Client::new(),
+            server_side_encryption: server_side_encryption.map(|s| s.to_owned()),
         })
     }
 
-    pub fn get(&self, key: &str, creds: Option<&AwsCredentials>) -> SFuture<Vec<u8>> {
-        let url = format!("{}{}", self.base_url, key);
-        debug!("GET {}", url);
+    fn path(&self, key: &str) -> String {
+        format!("/{}/{}", self.name, key)
+    }
 
-        let sr = SignedRequest::new(
-            "GET",
-            "s3",
-            &Region::UsEast2,
-            &format!("/{}/{}", self.name, key),
-        );
+    pub fn get(&self, key: &str, creds: Option<&AwsCredentials>) -> SFuture<Vec<u8>> {
+        let path = self.path(key);
+        debug!("GET {}", key);
+        let sr = SignedRequest::new("GET", "s3", &self.region, &path);
 
         let request = to_http_request(sr, creds.expect("wanted credentails"));
         let url = request.url().clone();
@@ -130,17 +123,14 @@ impl Bucket {
     }
 
     pub fn put(&self, key: &str, content: Vec<u8>, creds: &AwsCredentials) -> SFuture<()> {
-        let url = format!("{}{}", self.base_url, key);
-        debug!("PUT {}", url);
+        let path = self.path(key);
+        debug!("PUT {}", path);
 
-        let mut sr = SignedRequest::new(
-            "PUT",
-            "s3",
-            &Region::UsEast2,
-            &format!("/{}/{}", self.name, key),
-        );
+        let mut sr = SignedRequest::new("PUT", "s3", &self.region, &path);
 
-        sr.add_header("x-amz-server-side-encryption", "AES256");
+        if let Some(sse) = &self.server_side_encryption {
+            sr.add_header("x-amz-server-side-encryption", sse);
+        }
         sr.set_payload(Some(content));
 
         let request = to_http_request(sr, creds);
@@ -231,22 +221,4 @@ fn to_http_request(mut sr: SignedRequest, creds: &AwsCredentials) -> Request {
     };
 
     request
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_signature() {
-        assert_eq!(
-            signature("/foo/bar\nbar", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
-            "mwbstmHPMEJjTe2ksXi5H5f0c8U="
-        );
-
-        assert_eq!(
-            signature("/bar/foo\nbaz", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
-            "F9gZMso3+P+QTEyRKQ6qhZ1YM6o="
-        );
-    }
 }

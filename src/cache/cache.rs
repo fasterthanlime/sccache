@@ -385,9 +385,15 @@ pub fn storage_from_config(config: &Config, pool: &ThreadPool) -> Arc<dyn Storag
                 }
             }
             CacheType::S3(ref c) => {
-                debug!("Trying S3Cache({}, {})", c.bucket, c.endpoint);
+                debug!("Trying S3Cache({}, {:?})", c.bucket, c.region);
                 #[cfg(feature = "s3")]
-                match S3Cache::new(&c.bucket, &c.endpoint, c.use_ssl, &c.key_prefix) {
+                match S3Cache::new(
+                    &c.bucket,
+                    c.region.as_deref(),
+                    c.endpoint.as_deref(),
+                    &c.key_prefix,
+                    c.server_side_encryption.as_deref(),
+                ) {
                     Ok(s) => {
                         trace!("Using S3Cache");
                         return Arc::new(s);

@@ -197,9 +197,11 @@ pub struct RedisCacheConfig {
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
-    pub endpoint: String,
-    pub use_ssl: bool,
+    // Defaults to `us-east-1` if no endpoint or region set
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
     pub key_prefix: String,
+    pub server_side_encryption: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -447,19 +449,10 @@ pub struct EnvConfig {
 
 fn config_from_env() -> EnvConfig {
     let s3 = env::var("SCCACHE_BUCKET").ok().map(|bucket| {
-        let endpoint = match env::var("SCCACHE_ENDPOINT") {
-            Ok(endpoint) => format!("{}/{}", endpoint, bucket),
-            _ => match env::var("SCCACHE_REGION") {
-                Ok(ref region) if region != "us-east-1" => {
-                    format!("{}.s3-{}.amazonaws.com", bucket, region)
-                }
-                _ => format!("{}.s3.amazonaws.com", bucket),
-            },
-        };
-        let use_ssl = env::var("SCCACHE_S3_USE_SSL")
-            .ok()
-            .filter(|value| value != "off")
-            .is_some();
+        let endpoint = env::var("SCCACHE_ENDPOINT").ok();
+        let region = env::var("SCCACHE_REGION").ok();
+        let server_side_encryption = env::var("SCCACHE_S3_SERVER_SIDE_ENCRYPTION").ok();
+
         let key_prefix = env::var("SCCACHE_S3_KEY_PREFIX")
             .ok()
             .as_ref()
@@ -471,8 +464,9 @@ fn config_from_env() -> EnvConfig {
         S3CacheConfig {
             bucket,
             endpoint,
-            use_ssl,
+            region,
             key_prefix,
+            server_side_encryption,
         }
     });
 
